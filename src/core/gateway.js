@@ -272,7 +272,10 @@ async function gatewayCall(session, method, body = {}, { signal, reconnected = f
       await sleepUnlessAborted(ROUTE_RETRY_DELAYS_MS[routeAttempt], signal);
       return gatewayCall(session, method, body, { signal, reconnected, routeAttempt: routeAttempt + 1 });
     }
-    const detail = data.message || data.error || data.raw || res.statusText;
+    let detail = data.message || data.error || data.raw || res.statusText;
+    // After the retries above, a routing 404 almost always means the bot's computer is asleep
+    // (the load balancer has no target for the pod). Say so instead of leaving a bare 404.
+    if (isUnroutedRead(method, res, data)) detail += " (the bot's computer may be asleep: open the Grok Bot app and the bot, then retry)";
     throw new GatewayError(method + " failed: " + res.status + " " + redactSecrets(String(detail).slice(0, 300)), { status: res.status, method });
   }
   return data;

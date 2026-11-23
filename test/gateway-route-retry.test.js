@@ -38,7 +38,7 @@ test("read gives up after the bounded number of retries", async (t) => {
   let calls = 0;
   t.mock.method(globalThis, "fetch", async () => { calls += 1; return unrouted(); });
   const session = await connectGateway({});
-  await assert.rejects(() => listAgents(session), /404/);
+  await assert.rejects(() => listAgents(session), /404.*computer may be asleep/s);
   assert.equal(calls, 4); // first try + 3 retries (test env sets 1,1,1)
 });
 

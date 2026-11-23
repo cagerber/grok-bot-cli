@@ -48309,7 +48309,8 @@ ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
                         routeAttempt: routeAttempt + 1
                     });
                 }
-                const detail = data.message || data.error || data.raw || res.statusText;
+                let detail = data.message || data.error || data.raw || res.statusText;
+                if (isUnroutedRead(method, res, data)) detail += " (the bot's computer may be asleep: open the Grok Bot app and the bot, then retry)";
                 throw new GatewayError(method + " failed: " + res.status + " " + (0, _url_policy_js__rspack_import_4.fp)(String(detail).slice(0, 300)), {
                     status: res.status,
                     method
