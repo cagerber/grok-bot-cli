@@ -28201,6 +28201,27 @@ ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
             "getAgentThread"
         ]);
         const reconnectStates = new WeakMap();
+        const ROUTE_RETRY_DELAYS_MS = (process.env.GROK_BOT_ROUTE_RETRY_MS ?? "1000,2000,4000,8000").split(",").map((v)=>Number(v)).filter((v)=>Number.isFinite(v) && v >= 0);
+        function isUnroutedRead(method, res, data) {
+            if (!READ_ONLY_METHODS.has(method) || res.status !== 404) return false;
+            return /could not be routed/i.test(String(data?.message || data?.error || data?.raw || ""));
+        }
+        function sleepUnlessAborted(ms, signal) {
+            return new Promise((resolve, reject)=>{
+                if (signal?.aborted) return reject(signal.reason);
+                const timer = setTimeout(()=>{
+                    signal?.removeEventListener("abort", onAbort);
+                    resolve();
+                }, ms);
+                const onAbort = ()=>{
+                    clearTimeout(timer);
+                    reject(signal.reason);
+                };
+                signal?.addEventListener("abort", onAbort, {
+                    once: true
+                });
+            });
+        }
         function assertGatewayActive(signal) {
             if (signal?.aborted) {
                 const error = new GatewayError("Gateway submission cancelled before transmission");
@@ -28429,7 +28450,7 @@ ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
             await state.pending;
             assertGatewayActive(signal);
         }
-        async function gatewayCall(session, method, body = {}, { signal, reconnected = false } = {}) {
+        async function gatewayCall(session, method, body = {}, { signal, reconnected = false, routeAttempt = 0 } = {}) {
             assertGatewayActive(signal);
             const base = (0, _url_policy_js__rspack_import_4.Re)(session.gatewayUrl, {
                 kind: "gateway"
@@ -28461,6 +28482,14 @@ ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
                     return gatewayCall(session, method, body, {
                         signal,
                         reconnected: true
+                    });
+                }
+                if (isUnroutedRead(method, res, data) && routeAttempt < ROUTE_RETRY_DELAYS_MS.length) {
+                    await sleepUnlessAborted(ROUTE_RETRY_DELAYS_MS[routeAttempt], signal);
+                    return gatewayCall(session, method, body, {
+                        signal,
+                        reconnected,
+                        routeAttempt: routeAttempt + 1
                     });
                 }
                 const detail = data.message || data.error || data.raw || res.statusText;

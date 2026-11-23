@@ -20,6 +20,26 @@ export const GATEWAY_MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const READ_ONLY_METHODS = new Set(["listAgents", "getAgentWorkflows", "getAgentTranscriptTail", "getAgentThread"]);
 const reconnectStates = new WeakMap();
 
+// A pod that has just woken (or just been routed) can answer read calls with
+// 404 "The request could not be routed" for a few seconds before it serves
+// them. Retry read-only methods only, so a send is never repeated.
+const ROUTE_RETRY_DELAYS_MS = (process.env.GROK_BOT_ROUTE_RETRY_MS ?? "1000,2000,4000,8000")
+  .split(",").map((v) => Number(v)).filter((v) => Number.isFinite(v) && v >= 0);
+
+function isUnroutedRead(method, res, data) {
+  if (!READ_ONLY_METHODS.has(method) || res.status !== 404) return false;
+  return /could not be routed/i.test(String(data?.message || data?.error || data?.raw || ""));
+}
+
+function sleepUnlessAborted(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(signal.reason);
+    const timer = setTimeout(() => { signal?.removeEventListener("abort", onAbort); resolve(); }, ms);
+    const onAbort = () => { clearTimeout(timer); reject(signal.reason); };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 function assertGatewayActive(signal) {
   if (signal?.aborted) {
     const error = new GatewayError("Gateway submission cancelled before transmission");
@@ -212,7 +232,7 @@ async function refreshGateway(session, state, failedGeneration, signal) {
   assertGatewayActive(signal);
 }
 
-async function gatewayCall(session, method, body = {}, { signal, reconnected = false } = {}) {
+async function gatewayCall(session, method, body = {}, { signal, reconnected = false, routeAttempt = 0 } = {}) {
   assertGatewayActive(signal);
   const base = assertAllowedCredentialUrl(session.gatewayUrl, { kind: "gateway" });
   const url = base + "/api/" + method;
@@ -247,6 +267,10 @@ async function gatewayCall(session, method, body = {}, { signal, reconnected = f
     ) {
       await refreshGateway(session, reconnectState, generation, signal);
       return gatewayCall(session, method, body, { signal, reconnected: true });
+    }
+    if (isUnroutedRead(method, res, data) && routeAttempt < ROUTE_RETRY_DELAYS_MS.length) {
+      await sleepUnlessAborted(ROUTE_RETRY_DELAYS_MS[routeAttempt], signal);
+      return gatewayCall(session, method, body, { signal, reconnected, routeAttempt: routeAttempt + 1 });
     }
     const detail = data.message || data.error || data.raw || res.statusText;
     throw new GatewayError(method + " failed: " + res.status + " " + redactSecrets(String(detail).slice(0, 300)), { status: res.status, method });
